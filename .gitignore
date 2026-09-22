@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments and editor state
+.venv/
+venv/
+env/
+.vscode/
+.idea/
+
+# Training and inference artifacts
+outputs/
+runs/
+logs/
+*.log
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.engine
+*.npz
+
+# Local datasets and media
+data/
+dataset/
+datasets/
+*.mp4
+*.avi
+*.mov
+
+# Vendored third-party repositories and downloaded models
+third_party/
+checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+

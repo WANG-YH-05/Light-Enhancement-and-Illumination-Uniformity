@@ -1,0 +1,43 @@
+# Items explicitly specified by RRNet paper
+data:
+  root: "E:/Lighting Enhancement Project/task2/data/coding/MEAD_processed"
+
+model:
+  num_lights: 9
+  shorter_side: 512
+  coarse_factor: 4
+  use_agm: true
+  depth_vendor_root: "third_party/Depth-Anything-V2"
+  depth_checkpoint: "checkpoints/depth_anything_v2_vits.pth"
+  depth_input_size: 518
+  depth_invert: false
+  allow_depth_proxy: false
+  statistics_path: "checkpoints/mead_theta_stats_1000.npz"
+
+  # Reproduction assumptions because the paper omits these values
+  agm_channels: 64
+  sigma1: 0.10
+  sigma2: 0.05
+  clamp_output: true
+
+loss:
+  num_lights: 9
+  # Reproduction assumptions: not numerically specified in the paper
+  sigma_c: 0.10
+  sigma_l: 0.10
+  lambda_reg: 0.01
+  lambda_ambient: 1.0
+  ambient_max: 2.0
+  pixel_loss: "l1"
+
+training:
+  learning_rate: 1.0e-4
+  iterations: 300000
+  batch_size: 2
+  workers: 2
+  amp: true
+  log_every: 10
+  validate_every: 1000
+  validation_batches: 50
+  save_every: 10000
+  output_dir: "outputs/rrnet_mead"

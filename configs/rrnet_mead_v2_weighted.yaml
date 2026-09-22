@@ -1,0 +1,59 @@
+data:
+  root: "E:/Lighting Enhancement Project/RRNet/MEAD for RRNet/dataset"
+  metadata_file: "metadata.csv"
+  use_masks: true
+  sampling_seed: 20260906
+  train_sampling:
+    identity: 0.30
+    underexposed_cool: 0.1166666667
+    window_backlight: 0.1166666667
+    warm_side_light: 0.1166666667
+    top_light_shadow: 0.1166666667
+    warm_overexposure: 0.1166666667
+    mixed_office: 0.1166666665
+
+model:
+  num_lights: 9
+  shorter_side: 512
+  coarse_factor: 4
+  use_agm: false
+  depth_vendor_root: "third_party/Depth-Anything-V2"
+  depth_checkpoint: "checkpoints/depth_anything_v2_vits.pth"
+  depth_input_size: 518
+  depth_invert: false
+  allow_depth_proxy: false
+  statistics_path: "checkpoints/mead_v2_masked_theta_stats_1000.npz"
+  agm_channels: 64
+  sigma1: 0.10
+  sigma2: 0.05
+  clamp_output: true
+
+loss:
+  num_lights: 9
+  sigma_c: 0.10
+  sigma_l: 0.10
+  lambda_reg: 0.01
+  lambda_ambient: 1.0
+  ambient_max: 2.0
+  pixel_loss: "l1"
+  lambda_skin: 0.50
+  lambda_highlight: 0.20
+  lambda_background: 1.0
+  highlight_threshold: 0.95
+  highlight_margin: 0.05
+
+training:
+  learning_rate: 1.0e-4
+  scheduler: "warmup_cosine"
+  warmup_steps: 500
+  warmup_start_factor: 0.10
+  min_learning_rate: 1.0e-6
+  iterations: 2000
+  batch_size: 8
+  workers: 4
+  amp: true
+  log_every: 500
+  validate_every: 1000
+  validation_batches: 70
+  save_every: 500
+  output_dir: "outputs/rrnet_mead_v2_weighted"

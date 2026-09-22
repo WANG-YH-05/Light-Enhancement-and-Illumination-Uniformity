@@ -1,0 +1,62 @@
+task: "reference"
+
+data:
+  root: "E:/Lighting Enhancement Project/RRNet/MEAD for RRNet/dataset"
+  metadata_file: "metadata.csv"
+  manifest_file: "generation_manifest.json"
+  use_masks: true
+  sampling_seed: 20260906
+  reference_variants_per_source: 4
+  max_train_samples: 32
+  max_val_samples: 16
+
+model:
+  num_lights: 9
+  shorter_side: 512
+  coarse_factor: 4
+  use_agm: false
+  depth_vendor_root: "third_party/Depth-Anything-V2"
+  depth_checkpoint: "checkpoints/depth_anything_v2_vits.pth"
+  depth_input_size: 518
+  depth_invert: false
+  allow_depth_proxy: false
+  statistics_path: "checkpoints/mead_v2_masked_theta_stats_1000.npz"
+  agm_channels: 64
+  sigma1: 0.10
+  sigma2: 0.05
+  clamp_output: true
+  reference_code_dim: 32
+  residual_channels: 32
+  residual_factor: 4
+  max_luma_residual: 0.35
+
+loss:
+  num_lights: 9
+  sigma_c: 0.10
+  sigma_l: 0.10
+  lambda_reg: 0.01
+  lambda_ambient: 1.0
+  ambient_max: 2.0
+  pixel_loss: "l1"
+  lambda_skin: 0.50
+  lambda_highlight: 0.30
+  lambda_background: 1.0
+  highlight_threshold: 0.95
+  highlight_margin: 0.03
+  lambda_dark: 1.0
+  dark_lift_threshold: 0.03
+  dark_source_max: 0.65
+  lambda_chroma: 2.0
+
+training:
+  learning_rate: 1.0e-4
+  scheduler: "none"
+  iterations: 500
+  batch_size: 4
+  workers: 0
+  amp: true
+  log_every: 50
+  validate_every: 250
+  validation_batches: 4
+  save_every: 250
+  output_dir: "outputs/rrnet_mead_reference_overfit"

@@ -1,0 +1,11 @@
+torch>=2.5
+torchvision>=0.20
+numpy>=1.26
+Pillow>=10.0
+opencv-python>=4.8
+mediapipe>=0.10
+PyYAML>=6.0
+tqdm>=4.66
+pytest>=8.0
+lpips==0.1.4
+scipy>=1.10,<1.16

@@ -1,0 +1,2 @@
+@echo off
+"E:\conda_envs\iclight\python.exe" "E:\Lighting Enhancement Project\RRNet\Model\tools\build_mead_rrnet_dataset_v2.py" --source "E:\Lighting Enhancement Project\task2\data\coding\MEAD_processed" --output "E:\Lighting Enhancement Project\RRNet\MEAD for RRNet\dataset" --seed 20260906 --extreme-rate 0.08 --copy-mode hardlink --progress-every 250 >> "E:\Lighting Enhancement Project\RRNet\MEAD for RRNet\dataset\build.log" 2>> "E:\Lighting Enhancement Project\RRNet\MEAD for RRNet\dataset\build_error.log"
