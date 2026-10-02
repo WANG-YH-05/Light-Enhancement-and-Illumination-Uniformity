@@ -1,0 +1,45 @@
+task: "safe_agm_stage1"
+
+data:
+  root: "E:/Lighting Enhancement Project/RRNet/MEAD for RRNet/dataset"
+  metadata_file: "metadata.csv"
+  group_size: 4
+  include_identity: true
+  anchor_identity: true
+  sampling_seed: 20260927
+
+model:
+  shorter_side: 512
+  decoder_channels: 64
+  max_log_gain: 1.20
+  output_headroom: 0.999
+
+loss:
+  max_log_gain: 1.20
+  lambda_albedo: 3.00
+  lambda_gain: 0.35
+  lambda_gradient: 0.20
+  lambda_consistency: 0.10
+  lambda_identity: 1.00
+  lambda_chroma: 0.00
+  lambda_smooth: 0.03
+  lambda_background: 1.00
+  edge_scale: 12.0
+  epsilon: 0.001
+
+training:
+  learning_rate: 3.0e-5
+  encoder_learning_rate: 3.0e-6
+  min_learning_rate: 3.0e-6
+  warmup_steps: 100
+  weight_decay: 1.0e-4
+  iterations: 2000
+  batch_size: 1
+  workers: 2
+  amp: true
+  log_every: 100
+  validate_every: 500
+  validation_groups: 80
+  validation_batches: 80
+  save_every: 500
+  output_dir: "outputs/safe_agm_stage1_v2"

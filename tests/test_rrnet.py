@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 
 from rrnet.data import category_sample_weights
@@ -6,6 +7,13 @@ from rrnet.losses import RRNetLoss, luminance
 from rrnet.depth import depth_to_normals
 from rrnet.lighting import default_parameter_statistics, parameter_dim
 from rrnet.model import RRNet
+from rrnet.physical_reference_data import (
+    REFERENCE_LIGHTING_MODES,
+    sample_diverse_source_thetas,
+    sample_physical_theta,
+    sample_reference_theta,
+)
+from rrnet.renderer import RenderingModule
 from rrnet.person_mask import (
     MaskEMA,
     composite_person,
@@ -28,6 +36,27 @@ from rrnet.temporal import LightingEMA, ResidualEMA
 def test_parameter_shape() -> None:
     mean, std = default_parameter_statistics(9)
     assert mean.shape == std.shape == (parameter_dim(9),)
+
+
+def test_reference_theta_has_only_dark_normal_bright_modes() -> None:
+    means = []
+    for mode in REFERENCE_LIGHTING_MODES:
+        theta = sample_reference_theta(np.random.default_rng(19), 9, mode)
+        assert theta.shape == (parameter_dim(9),)
+        assert torch.isfinite(theta).all()
+        means.append(float(theta[-3:].mean()))
+    assert means[0] < means[1] < means[2]
+    with pytest.raises(ValueError):
+        sample_reference_theta(np.random.default_rng(19), 9, "side_light")
+
+
+def test_grouped_physical_source_lights_are_energy_distinct() -> None:
+    lights = sample_diverse_source_thetas(np.random.default_rng(21), 9, 4)
+    signatures = [torch.cat((theta[:-3].reshape(9, 10)[:, :3].flatten(), theta[-3:]))
+                  for theta in lights]
+    for index, left in enumerate(signatures):
+        for right in signatures[index + 1:]:
+            assert float((left - right).abs().mean()) >= 0.030
 
 
 def test_flat_depth_normals_face_camera() -> None:
@@ -61,6 +90,60 @@ def test_forward_smoke() -> None:
     assert result["output"].shape == (1, 3, 64, 64)
     assert result["theta"].shape == (1, parameter_dim(9))
     assert torch.isfinite(result["output"]).all()
+
+
+def test_agm_uses_paper_albedo_equation() -> None:
+    """The reconstructed AGM must implement A = I - Z exactly."""
+    model = RRNet(num_lights=9, shorter_side=64, allow_depth_proxy=True,
+                  use_agm=True, agm_channels=16)
+    model.eval()
+    image = torch.rand(1, 3, 64, 64)
+    with torch.no_grad():
+        result = model(image)
+    assert result["z"].shape == image.shape
+    assert result["z_prime"].shape[1] == 3
+    assert torch.allclose(result["albedo"], image - result["z"],
+                          atol=1.0e-6, rtol=1.0e-6)
+
+
+def test_physical_theta_sampler_returns_valid_ordered_parameters() -> None:
+    rng = np.random.default_rng(1234)
+    theta = sample_physical_theta(rng, 9).unsqueeze(0)
+    assert theta.shape == (1, parameter_dim(9))
+    renderer = RenderingModule(9, enforce_physical_parameters=True)
+    params = renderer.physical_parameters(theta)
+    assert torch.all(params["color"] >= 0.0)
+    assert torch.all(params["attenuation"] >= 0.0)
+    assert torch.all(params["ambient"] >= 0.0)
+    assert torch.all((params["position"] >= 0.0) & (params["position"] <= 1.0))
+    assert torch.allclose(params["direction"].norm(dim=-1),
+                          torch.ones(1, 9), atol=1.0e-5)
+
+
+def test_physical_renderer_prevents_negative_light_cancellation() -> None:
+    theta = torch.zeros(1, parameter_dim(9))
+    lights = theta[:, :90].reshape(1, 9, 10)
+    lights[..., 0:3] = -1.0
+    lights[..., 3:6] = torch.tensor([0.0, 0.0, 1.0])
+    lights[..., 6:9] = 0.5
+    lights[..., 9:10] = 1.0
+    theta[:, -3:] = 0.6
+    depth = torch.full((1, 1, 16, 16), 0.5)
+    historical = RenderingModule(9, enforce_physical_parameters=False)
+    physical = RenderingModule(9, enforce_physical_parameters=True)
+    historical_light, _ = historical.illumination(depth, theta)
+    physical_light, _ = physical.illumination(depth, theta)
+    assert torch.any(historical_light < 0.0)
+    assert torch.all(physical_light >= 0.6 - 1.0e-6)
+
+
+def test_reference_relative_model_rejects_undefined_agm_combination() -> None:
+    """The paper does not define AGM for cross-person reference transfer."""
+    with pytest.raises(ValueError, match="requires use_agm: false"):
+        ReferenceRelativeRRNet(
+            num_lights=9, shorter_side=64, allow_depth_proxy=True,
+            use_agm=True, agm_channels=16,
+        )
 
 
 def test_cached_illumination_matches_renderer_forward() -> None:
@@ -285,6 +368,27 @@ def test_reference_relative_forward_uses_bounded_ratio_without_residual() -> Non
     assert "luma_residual" not in result
 
 
+def test_grouped_forward_matches_independent_forward_in_eval_mode() -> None:
+    model = ReferenceRelativeRRNet(
+        num_lights=9, shorter_side=64, allow_depth_proxy=True,
+        use_agm=False, min_transfer_gain=0.4, max_transfer_gain=3.0,
+    ).eval()
+    source = torch.rand(4, 3, 64, 64).clamp_min(0.05)
+    reference_one = torch.rand(1, 3, 64, 64).clamp_min(0.05)
+    reference = reference_one.expand(4, -1, -1, -1).contiguous()
+    mask = torch.ones(4, 1, 64, 64)
+    with torch.no_grad():
+        independent = model(source, reference, mask, mask, mask)
+        grouped = model.forward_grouped(
+            source, reference, 4, mask, mask, mask)
+    for key in (
+            "output", "source_theta", "reference_theta",
+            "source_illumination", "reference_illumination",
+            "reference_illumination_on_source", "transfer_gain"):
+        assert torch.allclose(
+            independent[key], grouped[key], atol=1.0e-5, rtol=1.0e-5), key
+
+
 def test_reference_relative_loss_reports_illumination_metrics() -> None:
     model = ReferenceRelativeRRNet(
         num_lights=9, shorter_side=64, allow_depth_proxy=True,
@@ -420,6 +524,157 @@ def test_reference_category_probabilities_normalize_requested_mix() -> None:
         torch.from_numpy(probabilities),
         torch.tensor([0.25, 0.50, 0.25], dtype=torch.float64),
     )
+
+
+def test_grouped_source_categories_are_distinct_and_deterministic() -> None:
+    dataset = object.__new__(MEADReferenceTriplets)
+    dataset.categories = ("identity", "dark", "side", "top", "over")
+    dataset.grouped_source_count = 4
+    dataset.source_category_probabilities = np.asarray(
+        [0.05, 0.25, 0.25, 0.25, 0.20], dtype=np.float64)
+    first = dataset._source_categories(np.random.default_rng(17))
+    second = dataset._source_categories(np.random.default_rng(17))
+    assert first == second
+    assert len(first) == len(set(first)) == 4
+
+
+def test_multiscale_gain_gradient_is_zero_for_exact_spatial_gain() -> None:
+    criterion = ReferenceRelativeLoss(
+        num_lights=9, lambda_gain_gradient=1.0,
+        gain_gradient_scales=(1, 2, 4),
+    )
+    log_gain = torch.rand(2, 1, 32, 32)
+    mask = torch.ones(2, 1, 32, 32)
+    assert float(criterion.gain_gradient_loss(log_gain, log_gain, mask)) < 1.0e-7
+
+
+def test_illumination_decomposition_is_zero_for_exact_light() -> None:
+    criterion = ReferenceRelativeLoss(num_lights=9)
+    light = torch.rand(2, 1, 32, 32).mul(1.5).add(0.2)
+    mask = torch.ones(2, 1, 32, 32)
+    exposure, shape, gradient, variance, *_ = (
+        criterion.illumination_decomposition_loss(light, light, mask)
+    )
+    assert float(exposure) < 1.0e-7
+    assert float(shape) < 1.0e-7
+    assert float(gradient) < 1.0e-7
+    assert float(variance) < 1.0e-7
+
+
+def test_illumination_shape_rejects_ambient_only_side_light_solution() -> None:
+    criterion = ReferenceRelativeLoss(num_lights=9)
+    mask = torch.ones(1, 1, 32, 32)
+    predicted = torch.ones(1, 1, 32, 32, requires_grad=True)
+    horizontal = torch.linspace(0.35, 1.65, 32).view(1, 1, 1, 32)
+    target = horizontal.expand_as(predicted)
+    exposure, shape, gradient, variance, *_ = (
+        criterion.illumination_decomposition_loss(predicted, target, mask)
+    )
+    # Both maps have mean one, so exposure alone cannot distinguish them.
+    assert float(exposure) < 1.0e-6
+    assert float(shape) > 0.20
+    assert float(gradient) > 0.01
+    assert float(variance) > 0.20
+    total = shape + gradient + variance
+    total.backward()
+    assert predicted.grad is not None
+    assert torch.isfinite(predicted.grad).all()
+
+
+def test_illumination_shape_is_invariant_to_global_exposure() -> None:
+    criterion = ReferenceRelativeLoss(num_lights=9)
+    mask = torch.ones(1, 1, 32, 32)
+    target = torch.linspace(0.30, 1.20, 32).view(1, 1, 1, 32)
+    target = target.expand(1, 1, 32, 32)
+    predicted = target * 2.5
+    exposure, shape, gradient, variance, *_ = (
+        criterion.illumination_decomposition_loss(predicted, target, mask)
+    )
+    assert float(exposure) > 0.8
+    assert float(shape) < 1.0e-6
+    assert float(gradient) < 1.0e-6
+    assert float(variance) < 1.0e-6
+
+
+def test_grouped_output_consistency_penalizes_different_input_lights() -> None:
+    model = ReferenceRelativeRRNet(
+        num_lights=9, shorter_side=64, allow_depth_proxy=True,
+        use_agm=False, max_transfer_gain=5.0,
+    ).eval()
+    source_clean = torch.full((4, 3, 64, 64), 0.40)
+    levels = torch.tensor([0.15, 0.30, 0.55, 0.80]).view(4, 1, 1, 1)
+    source = source_clean * levels
+    target = torch.full_like(source, 0.35)
+    reference = torch.full_like(source, 0.35)
+    mask = torch.ones(4, 1, 64, 64)
+    with torch.no_grad():
+        prediction = model(source, reference, mask, mask, mask)
+        prediction["output"] = source
+        prediction["loss_output"] = source
+        losses = ReferenceRelativeLoss(
+            num_lights=9, lambda_consistency=1.0,
+        )(
+            prediction, target, source, mask, mask,
+            source_clean=source_clean,
+            reference=reference,
+            reference_clean=source_clean,
+            source_light_mask=mask,
+            reference_mask=mask,
+            group_size=4,
+        )
+    assert float(losses["consistency"]) > 0.05
+    assert torch.isfinite(losses["total"])
+
+
+def test_physical_grouped_forward_expands_only_the_repeated_side() -> None:
+    model = ReferenceRelativeRRNet(
+        num_lights=9, shorter_side=64, allow_depth_proxy=True,
+        use_agm=False, enforce_physical_parameters=True,
+    ).eval()
+    source = torch.rand(8, 3, 64, 64)
+    reference = torch.rand(8, 3, 64, 64)
+    # Group 0: four source lights, one fixed reference.
+    reference[:4] = reference[0]
+    # Group 1: one fixed source, four changing references.
+    source[4:] = source[4]
+    mask = torch.ones(8, 1, 64, 64)
+    group_flags = torch.tensor([True] * 4 + [False] * 4)
+    with torch.no_grad():
+        result = model.forward_physical_grouped(
+            source, reference, 4, group_flags, mask, mask, mask)
+    assert result["output"].shape == source.shape
+    assert torch.equal(result["reference_theta"][:4],
+                       result["reference_theta"][0:1].expand(4, -1))
+    assert torch.equal(result["source_theta"][4:],
+                       result["source_theta"][4:5].expand(4, -1))
+
+
+def test_reference_contrast_detects_ignored_reference() -> None:
+    criterion = ReferenceRelativeLoss(
+        num_lights=9, lambda_reference_contrast=1.0)
+    source = torch.full((4, 3, 8, 8), 0.3)
+    target_levels = torch.tensor([0.15, 0.15, 0.65, 0.65]).view(4, 1, 1, 1)
+    target = target_levels.expand_as(source)
+    mask = torch.ones(4, 1, 8, 8)
+    theta = torch.zeros(4, parameter_dim(9))
+    prediction = {
+        "output": source, "loss_output": source,
+        "depth": torch.ones(4, 1, 8, 8),
+        "source_illumination": torch.ones_like(source),
+        "reference_illumination": torch.ones_like(source),
+        "reference_illumination_on_source": torch.ones_like(source),
+        "transfer_gain": torch.ones_like(source),
+        "theta": theta, "source_theta": theta, "reference_theta": theta,
+        "source_theta_normalized": theta,
+        "reference_theta_normalized": theta,
+    }
+    losses = criterion(
+        prediction, target, source, mask, mask,
+        source_clean=torch.ones_like(source), reference=target,
+        reference_clean=torch.ones_like(source), source_light_mask=mask,
+        reference_mask=mask, group_size=4,
+        uniform_group_mask=torch.zeros(4, dtype=torch.bool))
+    assert float(losses["reference_contrast"]) > 0.2
 
 
 def test_reference_relative_dark_log_lift_targets_deep_shadows() -> None:

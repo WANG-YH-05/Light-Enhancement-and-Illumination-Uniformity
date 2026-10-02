@@ -187,6 +187,16 @@ data:
 
 目标图始终保留人物 A 的身份和色度。代码从 `generation_manifest.json` 读取参考样本的具体光照配置与时间相位，将其应用到人物 A 的 clean frame，而不是直接将人物 B 的图像作为真值。
 
+### 分组一致性训练
+
+新的分组训练模式会在同一个样本中放入人物 A 同一帧的多种输入光照，并让它们共享完全相同的参考图 B 和目标图 T：
+
+```text
+{A_dark, A_backlight, A_side, A_overexposed} + B_ref -> 同一个 T
+```
+
+`lambda_consistency` 直接约束这些输出的亮度分布相互一致；`lambda_gain_gradient` 在多个尺度上约束预测增益图的空间梯度，使模型不仅匹配整体亮度，也学习局部明暗分布。该训练改动不会增加推理结构或推理耗时。
+
 ## 配置
 
 公开示例训练配置（数据路径需要按本机情况修改）：
@@ -230,6 +240,21 @@ python calibrate_relative_lighting_stats.py \
 ```bash
 python train.py \
   --config configs/example_reference_relative.yaml
+```
+
+分组一致性实验先使用当前基线权重进行 5000 步验证：
+
+```powershell
+& "E:\conda_envs\iclight\python.exe" train.py `
+  --config "configs\rrnet_mead_reference_relative_grouped_pilot.yaml" `
+  --init-from "outputs\rrnet_mead_reference_relative_darklift_scratch\run_20260911_185954\rrnet_step_0014000.pt"
+```
+
+确认有效后，从随机初始化开始进行 30000 步正式训练：
+
+```powershell
+& "E:\conda_envs\iclight\python.exe" train.py `
+  --config "configs\rrnet_mead_reference_relative_grouped_scratch.yaml"
 ```
 
 每次训练会在 `output_dir/run_YYYYMMDD_HHMMSS/` 下保存：

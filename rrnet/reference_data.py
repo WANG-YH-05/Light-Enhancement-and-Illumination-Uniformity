@@ -87,6 +87,7 @@ class MEADReferenceTriplets(Dataset):
                  manifest_file: str = "generation_manifest.json",
                  seed: int = 20260906,
                  variants_per_source: int = 4,
+                 grouped_source_count: int = 1,
                  dynamic_epoch: bool = True,
                  source_category_weights: dict[str, float] | None = None,
                  target_category_weights: dict[str, float] | None = None) -> None:
@@ -95,6 +96,9 @@ class MEADReferenceTriplets(Dataset):
         if variants_per_source < 1:
             raise ValueError("variants_per_source must be at least one.")
         self.variants_per_source = variants_per_source
+        if grouped_source_count < 1:
+            raise ValueError("grouped_source_count must be at least one.")
+        self.grouped_source_count = int(grouped_source_count)
         self.dynamic_epoch = dynamic_epoch
         self.epoch = 0
         with (self.root / metadata_file).open(newline="", encoding="utf-8-sig") as handle:
@@ -114,6 +118,18 @@ class MEADReferenceTriplets(Dataset):
             self.categories, source_category_weights, "source_category_weights")
         self.target_category_probabilities = _category_probabilities(
             self.categories, target_category_weights, "target_category_weights")
+        if self.grouped_source_count > len(self.categories):
+            raise ValueError(
+                "grouped_source_count cannot exceed the number of degradation "
+                f"categories ({len(self.categories)})."
+            )
+        if (self.source_category_probabilities is not None
+                and np.count_nonzero(self.source_category_probabilities) <
+                self.grouped_source_count):
+            raise ValueError(
+                "source_category_weights must give positive probability to at "
+                "least grouped_source_count categories."
+            )
         expected = set(self.categories)
         incomplete = [next(iter(group.values()))["clean_frame"]
                       for group in self.samples if set(group) != expected]
@@ -168,7 +184,25 @@ class MEADReferenceTriplets(Dataset):
                 return candidate
         raise RuntimeError("Unable to select a different-person reference.")
 
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor | str]:
+    def _source_categories(self, rng: np.random.Generator) -> tuple[str, ...]:
+        """Select distinct input lights for one shared reference/target group."""
+        if self.grouped_source_count == 1:
+            if self.source_category_probabilities is None:
+                chosen = int(rng.integers(0, len(self.categories)))
+                return (self.categories[chosen],)
+            return (str(rng.choice(
+                self.categories, p=self.source_category_probabilities)),)
+        selected = rng.choice(
+            self.categories,
+            size=self.grouped_source_count,
+            replace=False,
+            p=self.source_category_probabilities,
+        )
+        return tuple(str(category) for category in selected)
+
+    def __getitem__(
+            self, index: int
+    ) -> dict[str, torch.Tensor | str | tuple[str, ...]]:
         # Keep all deterministic reference variants for one source adjacent.
         # This also makes a small contiguous Subset a meaningful overfit test:
         # the model must map one identical source to several reference lights.
@@ -183,13 +217,7 @@ class MEADReferenceTriplets(Dataset):
         reference_index = self._reference_index(source_index, rng)
         # All reference variants of one source share the exact same input A.
         # Therefore a network cannot solve the task without looking at B.
-        if self.source_category_probabilities is None:
-            source_category = self.categories[
-                int(source_rng.integers(0, len(self.categories)))
-            ]
-        else:
-            source_category = str(source_rng.choice(
-                self.categories, p=self.source_category_probabilities))
+        source_categories = self._source_categories(source_rng)
         variant_index = index % self.variants_per_source
         if self.target_category_probabilities is None:
             category_offset = int(target_rng.integers(0, len(self.categories)))
@@ -205,7 +233,6 @@ class MEADReferenceTriplets(Dataset):
                 self.categories, p=self.target_category_probabilities))
         source_group = self.samples[source_index]
         reference_group = self.samples[reference_index]
-        source_row = source_group[source_category]
         reference_row = reference_group[target_category]
         identity_row = source_group["identity"]
         reference_identity_row = reference_group["identity"]
@@ -242,8 +269,11 @@ class MEADReferenceTriplets(Dataset):
             Image.open(relight_path).convert("L"), dtype=np.float32,
         ) / 255.0
         source_face_mask = face_attention_from_person_mask(source_person_mask)
-        return {
-            "input": load_rgb(self.root / source_row["bad_light_frame"]),
+        sample: dict[str, torch.Tensor | str | tuple[str, ...]] = {
+            "input": torch.stack([
+                load_rgb(self.root / source_group[category]["bad_light_frame"])
+                for category in source_categories
+            ]),
             "reference": load_rgb(self.root / reference_row["bad_light_frame"]),
             "source_clean": torch.from_numpy(np.ascontiguousarray(clean))
                               .permute(2, 0, 1).contiguous(),
@@ -258,8 +288,27 @@ class MEADReferenceTriplets(Dataset):
             "reference_mask": torch.from_numpy(reference_face_mask).permute(2, 0, 1).contiguous(),
             "reference_relight_mask": load_mask(
                 self.root / reference_identity_row["relight_mask"]),
-            "source_person_id": source_row["person_id"],
+            "source_person_id": identity_row["person_id"],
             "reference_person_id": reference_row["person_id"],
-            "source_category": source_category,
+            "source_category": source_categories,
             "target_category": target_category,
         }
+        if self.grouped_source_count == 1:
+            # Preserve the historical dataset interface for all old configs.
+            sample["input"] = sample["input"][0]
+            sample["source_category"] = source_categories[0]
+            return sample
+
+        # Only the input light varies inside a group. Repeating the common
+        # tensors here keeps PyTorch's default collation and the old training
+        # code path simple; train.py flattens [batch, group] before inference.
+        for key in (
+            "reference", "source_clean", "reference_clean", "target",
+            "skin_mask", "relight_mask", "source_light_mask",
+            "reference_mask", "reference_relight_mask",
+        ):
+            value = sample[key]
+            assert isinstance(value, torch.Tensor)
+            sample[key] = value.unsqueeze(0).expand(
+                self.grouped_source_count, *value.shape).contiguous()
+        return sample

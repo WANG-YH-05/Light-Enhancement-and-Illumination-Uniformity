@@ -1,0 +1,53 @@
+# Isolated RRNet-style 3-channel AGM pilot with exact synthetic light.
+# Does not overwrite or change any reference-relative model checkpoint.
+data:
+  root: "E:/Lighting Enhancement Project/RRNet/MEAD for RRNet/dataset"
+  metadata_file: "metadata.csv"
+  sampling_seed: 20260926
+  variants_per_source: 2
+  group_size: 4
+  target_lighting_weights:
+    dark: 0.5
+    normal: 0.5
+    bright: 0.0
+
+model:
+  num_lights: 9
+  shorter_side: 512
+  coarse_factor: 4
+  use_agm: true
+  depth_vendor_root: "third_party/Depth-Anything-V2"
+  depth_checkpoint: "checkpoints/depth_anything_v2_vits.pth"
+  depth_input_size: 448
+  depth_invert: false
+  allow_depth_proxy: false
+  statistics_path: null
+  agm_channels: 64
+  sigma1: 0.10
+  sigma2: 0.05
+  clamp_output: true
+  enforce_physical_parameters: true
+
+loss:
+  lambda_output: 1.0
+  lambda_base: 1.0
+  lambda_spatial: 0.5
+  lambda_chroma: 0.1
+  lambda_background: 0.5
+  lambda_identity: 0.5
+
+training:
+  # Only the frozen encoder is loaded from this existing model.
+  encoder_checkpoint: "outputs/rrnet_mead_reference_relative_darklift_scratch/run_20260911_185954/rrnet_step_0010000.pt"
+  iterations: 2000
+  batch_size: 1
+  workers: 2
+  amp: true
+  learning_rate: 3.0e-5
+  weight_decay: 1.0e-4
+  log_every: 100
+  validate_every: 500
+  validation_groups: 48
+  validation_batches: 48
+  save_every: 500
+  output_dir: "outputs/rrnet_agm_physical_pilot"

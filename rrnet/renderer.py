@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from .depth import depth_to_normals
 from .lighting import unpack_lights
@@ -11,15 +12,35 @@ from .lighting import unpack_lights
 
 class RenderingModule(nn.Module):
     def __init__(self, num_lights: int = 9, sigma1: float = 0.10,
-                 sigma2: float = 0.05, clamp_output: bool = True) -> None:
+                 sigma2: float = 0.05, clamp_output: bool = True,
+                 enforce_physical_parameters: bool = False) -> None:
         super().__init__()
         self.num_lights = num_lights
         self.sigma1 = sigma1
         self.sigma2 = sigma2
         self.clamp_output = clamp_output
+        self.enforce_physical_parameters = bool(enforce_physical_parameters)
+
+    def physical_parameters(self, theta: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Unpack theta and optionally project it to the valid light domain.
+
+        The historical renderer remains byte-for-byte equivalent when the new
+        option is disabled.  Physical-pair configs enable this projection so
+        negative RGB lights cannot cancel an oversized ambient term.
+        """
+        params = unpack_lights(theta, self.num_lights)
+        if not self.enforce_physical_parameters:
+            return params
+        return {
+            "color": params["color"].clamp_min(0.0),
+            "direction": F.normalize(params["direction"], dim=-1, eps=1.0e-6),
+            "position": params["position"].clamp(0.0, 1.0),
+            "attenuation": params["attenuation"].clamp_min(0.0),
+            "ambient": params["ambient"].clamp_min(0.0),
+        }
 
     def illumination(self, depth: torch.Tensor, theta: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        params = unpack_lights(theta, self.num_lights)
+        params = self.physical_parameters(theta)
         batch, _, height, width = depth.shape
         dtype, device = depth.dtype, depth.device
         yy, xx = torch.meshgrid(

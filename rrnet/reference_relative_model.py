@@ -145,12 +145,18 @@ class ReferenceRelativeRRNet(nn.Module):
     def forward(self, source: torch.Tensor, reference: torch.Tensor,
                 relight_mask: torch.Tensor | None = None,
                 reference_mask: torch.Tensor | None = None,
-                source_light_mask: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+                source_light_mask: torch.Tensor | None = None,
+                source_depth_override: torch.Tensor | None = None,
+                reference_depth_override: torch.Tensor | None = None,
+                ) -> dict[str, torch.Tensor]:
         source_prediction = self.estimate_light(source, source_light_mask)
         reference_prediction = self.estimate_light(reference, reference_mask)
         with torch.no_grad():
-            source_depth = self.depth(source)
-            reference_depth = self.depth(reference)
+            source_depth = (self.depth(source) if source_depth_override is None
+                            else source_depth_override)
+            reference_depth = (
+                self.depth(reference) if reference_depth_override is None
+                else reference_depth_override)
         result = self.transfer(
             source,
             source_depth,
@@ -169,5 +175,168 @@ class ReferenceRelativeRRNet(nn.Module):
             "source_theta_offset": source_prediction["theta_offset"],
             "reference_theta0": reference_prediction["theta0"],
             "reference_theta_offset": reference_prediction["theta_offset"],
+        })
+        return result
+
+    @staticmethod
+    def _expand_group(value: torch.Tensor, group_size: int) -> torch.Tensor:
+        """Repeat one value per group in contiguous group-member order."""
+        return value.unsqueeze(1).expand(
+            value.shape[0], group_size, *value.shape[1:]
+        ).reshape(-1, *value.shape[1:])
+
+    def forward_grouped(
+            self, source: torch.Tensor, reference: torch.Tensor,
+            group_size: int,
+            relight_mask: torch.Tensor | None = None,
+            reference_mask: torch.Tensor | None = None,
+            source_light_mask: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Train several source lights against one reference without duplication.
+
+        The dataset/collator repeats common reference tensors so old data loading
+        remains compatible. Here only one reference per group is encoded. Source
+        variants and unique references are sent through LPRM in one joint call,
+        which prevents repeated references from corrupting BatchNorm statistics.
+        """
+        if group_size < 2 or source.shape[0] % group_size:
+            raise ValueError(
+                f"Invalid grouped batch: batch={source.shape[0]}, "
+                f"group_size={group_size}."
+            )
+        reference_unique = reference[::group_size]
+        reference_mask_unique = (
+            reference_mask[::group_size] if reference_mask is not None else None)
+        prepared_source = self.prepare_light_input(source, source_light_mask)
+        prepared_reference = self.prepare_light_input(
+            reference_unique, reference_mask_unique)
+        source_count = source.shape[0]
+        joint_prediction = self.base.lprm(torch.cat(
+            (prepared_source, prepared_reference), dim=0))
+
+        source_theta = joint_prediction["theta"][:source_count]
+        reference_theta_unique = joint_prediction["theta"][source_count:]
+        reference_theta = self._expand_group(
+            reference_theta_unique, group_size)
+        with torch.no_grad():
+            source_depth = self.depth(source)
+            reference_depth_unique = self.depth(reference_unique)
+        result = self.transfer(
+            source, source_depth, source_theta, reference_theta, relight_mask)
+
+        reference_light_unique, _ = self.illumination_from_theta(
+            reference_depth_unique, reference_theta_unique)
+        result.update({
+            "reference_depth": self._expand_group(
+                reference_depth_unique, group_size),
+            "reference_illumination": self._expand_group(
+                reference_light_unique, group_size),
+            "source_theta_normalized": joint_prediction[
+                "theta_normalized"][:source_count],
+            "reference_theta_normalized": self._expand_group(
+                joint_prediction["theta_normalized"][source_count:], group_size),
+            "source_theta0": joint_prediction["theta0"][:source_count],
+            "source_theta_offset": joint_prediction[
+                "theta_offset"][:source_count],
+            "reference_theta0": self._expand_group(
+                joint_prediction["theta0"][source_count:], group_size),
+            "reference_theta_offset": self._expand_group(
+                joint_prediction["theta_offset"][source_count:], group_size),
+        })
+        return result
+
+    def forward_physical_grouped(
+            self, source: torch.Tensor, reference: torch.Tensor,
+            group_size: int, uniform_group_mask: torch.Tensor,
+            relight_mask: torch.Tensor | None = None,
+            reference_mask: torch.Tensor | None = None,
+            source_light_mask: torch.Tensor | None = None,
+            source_depth_override: torch.Tensor | None = None,
+            reference_depth_override: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Encode only unique images in mixed physical training groups.
+
+        Uniformity groups contain K distinct sources and one repeated reference;
+        reference-sensitivity groups contain one repeated source and K distinct
+        references. Removing those exact duplicates before LPRM is essential:
+        otherwise repeated images corrupt BatchNorm running statistics and create
+        a large train/eval gap.
+        """
+        if group_size < 2 or source.shape[0] % group_size:
+            raise ValueError("Invalid physical grouped batch")
+        flags = uniform_group_mask.reshape(-1, group_size)
+        if not torch.all(flags == flags[:, :1]):
+            raise ValueError("uniform_group_mask must be constant within a group")
+
+        source_unique: list[int] = []
+        reference_unique: list[int] = []
+        source_map: list[int] = []
+        reference_map: list[int] = []
+        for group_index, is_uniform in enumerate(flags[:, 0].tolist()):
+            start = group_index * group_size
+            members = list(range(start, start + group_size))
+            if is_uniform:
+                source_positions = members
+                reference_positions = [start]
+            else:
+                source_positions = [start]
+                reference_positions = members
+            source_offset = len(source_unique)
+            reference_offset = len(reference_unique)
+            source_unique.extend(source_positions)
+            reference_unique.extend(reference_positions)
+            source_map.extend(
+                [source_offset + member if is_uniform else source_offset
+                 for member in range(group_size)])
+            reference_map.extend(
+                [reference_offset if is_uniform else reference_offset + member
+                 for member in range(group_size)])
+
+        source_indices = torch.tensor(source_unique, device=source.device)
+        reference_indices = torch.tensor(reference_unique, device=source.device)
+        source_expand = torch.tensor(source_map, device=source.device)
+        reference_expand = torch.tensor(reference_map, device=source.device)
+        prepared_source = self.prepare_light_input(
+            source.index_select(0, source_indices),
+            source_light_mask.index_select(0, source_indices)
+            if source_light_mask is not None else None)
+        prepared_reference = self.prepare_light_input(
+            reference.index_select(0, reference_indices),
+            reference_mask.index_select(0, reference_indices)
+            if reference_mask is not None else None)
+        source_unique_count = len(source_unique)
+        joint = self.base.lprm(torch.cat((prepared_source, prepared_reference), dim=0))
+
+        def expanded(key: str) -> tuple[torch.Tensor, torch.Tensor]:
+            source_value = joint[key][:source_unique_count].index_select(
+                0, source_expand)
+            reference_value = joint[key][source_unique_count:].index_select(
+                0, reference_expand)
+            return source_value, reference_value
+
+        source_theta, reference_theta = expanded("theta")
+        source_theta_normalized, reference_theta_normalized = expanded(
+            "theta_normalized")
+        source_theta0, reference_theta0 = expanded("theta0")
+        source_theta_offset, reference_theta_offset = expanded("theta_offset")
+        with torch.no_grad():
+            source_depth = (self.depth(source) if source_depth_override is None
+                            else source_depth_override)
+            reference_depth = (
+                self.depth(reference) if reference_depth_override is None
+                else reference_depth_override)
+        result = self.transfer(
+            source, source_depth, source_theta, reference_theta, relight_mask)
+        reference_light, _ = self.illumination_from_theta(
+            reference_depth, reference_theta)
+        result.update({
+            "reference_depth": reference_depth,
+            "reference_illumination": reference_light,
+            "source_theta_normalized": source_theta_normalized,
+            "reference_theta_normalized": reference_theta_normalized,
+            "source_theta0": source_theta0,
+            "source_theta_offset": source_theta_offset,
+            "reference_theta0": reference_theta0,
+            "reference_theta_offset": reference_theta_offset,
         })
         return result

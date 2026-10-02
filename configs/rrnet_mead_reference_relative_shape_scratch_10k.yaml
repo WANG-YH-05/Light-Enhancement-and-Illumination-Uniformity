@@ -1,0 +1,108 @@
+task: "reference_relative_physical"
+
+data:
+  root: "E:/Lighting Enhancement Project/RRNet/MEAD for RRNet/dataset"
+  metadata_file: "metadata.csv"
+  use_masks: true
+  sampling_seed: 20260929
+  reference_variants_per_source: 4
+  reference_dynamic_epoch: true
+  physical_group_size: 4
+  reference_sensitivity_fraction: 0.20
+  validation_physical_group_size: 4
+  validation_reference_sensitivity_fraction: 0.20
+  reference_lighting_weights:
+    dark: 0.50
+    normal: 0.50
+    bright: 0.00
+
+model:
+  num_lights: 9
+  shorter_side: 512
+  coarse_factor: 4
+  use_agm: false
+  depth_vendor_root: "third_party/Depth-Anything-V2"
+  depth_checkpoint: "checkpoints/depth_anything_v2_vits.pth"
+  depth_input_size: 448
+  depth_invert: false
+  allow_depth_proxy: false
+  statistics_path: null
+  agm_channels: 64
+  sigma1: 0.10
+  sigma2: 0.05
+  clamp_output: true
+  enforce_physical_parameters: true
+  illumination_floor: 0.05
+  min_transfer_gain: 0.40
+  max_transfer_gain: 5.00
+  achromatic_illumination: true
+  preserve_chromaticity: true
+  output_headroom: 0.999
+
+loss:
+  num_lights: 9
+  sigma_c: 0.10
+  sigma_l: 0.10
+  lambda_reg: 0.01
+  lambda_ambient: 1.0
+  ambient_max: 2.0
+  pixel_loss: "l1"
+  lambda_skin: 0.50
+  lambda_highlight: 0.30
+  lambda_background: 1.0
+  highlight_threshold: 0.95
+  highlight_margin: 0.03
+  lambda_dark: 0.30
+  dark_lift_threshold: 0.03
+  dark_source_max: 0.65
+  dark_mode: "symmetric"
+  lambda_chroma: 0.00
+
+  lambda_source_illumination: 0.50
+  lambda_reference_illumination: 0.50
+  lambda_target_illumination: 0.50
+  illumination_target_floor: 0.04
+  illumination_target_max: 5.00
+  lambda_gain: 0.75
+  gain_target_floor: 0.025
+  gain_target_min: 0.40
+  gain_target_max: 5.00
+  lambda_gain_gradient: 0.25
+  gain_gradient_scales: [1, 2, 4]
+  lambda_consistency: 0.25
+  lambda_reference_contrast: 0.50
+
+  lambda_illumination_exposure: 0.50
+  lambda_illumination_shape: 1.00
+  lambda_illumination_shape_gradient: 0.50
+  lambda_spatial_variance: 0.50
+  lambda_ambient_ratio: 0.25
+  lambda_shape_consistency: 0.75
+
+  lambda_dark_log_lift: 0.10
+  dark_log_lift_threshold: 0.03
+  dark_log_source_max: 0.20
+  dark_log_epsilon: 0.001
+  lambda_theta_source: 0.50
+  lambda_theta_reference: 0.50
+
+video:
+  theta_beta: 0.95
+
+training:
+  learning_rate: 5.0e-5
+  scheduler: "warmup_cosine"
+  warmup_steps: 500
+  warmup_start_factor: 0.10
+  min_learning_rate: 1.0e-6
+  iterations: 10000
+  batch_size: 1
+  workers: 2
+  amp: true
+  log_every: 200
+  validate_every: 1000
+  validation_batches: 30
+  save_every: 1000
+  reset_light_heads_on_init: false
+  freeze_encoder_steps: 0
+  output_dir: "outputs/rrnet_mead_reference_relative_shape_scratch_10k"

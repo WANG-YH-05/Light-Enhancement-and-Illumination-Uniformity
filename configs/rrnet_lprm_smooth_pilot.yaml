@@ -1,0 +1,38 @@
+# Standalone lighting-map diagnostic, not a deployment training configuration.
+task: reference_relative_physical
+data:
+  root: "E:/Lighting Enhancement Project/RRNet/MEAD for RRNet/dataset"
+  metadata_file: metadata.csv
+  sampling_seed: 20260929
+  reference_variants_per_source: 4
+  physical_group_size: 4
+  reference_sensitivity_fraction: 0.20
+  reference_lighting_weights: {dark: 0.50, normal: 0.50, bright: 0.00}
+model:
+  num_lights: 9
+  shorter_side: 512
+  coarse_factor: 4
+  use_agm: false
+  depth_vendor_root: third_party/Depth-Anything-V2
+  depth_checkpoint: checkpoints/depth_anything_v2_vits.pth
+  depth_input_size: 448
+  allow_depth_proxy: false
+  statistics_path: checkpoints/mead_grouped_theta_stats_smooth_20261001.npz
+  light_parameterization: smooth_physical
+  enforce_physical_parameters: true
+  achromatic_illumination: true
+  preserve_chromaticity: true
+  min_transfer_gain: 0.40
+  max_transfer_gain: 5.00
+diagnostic:
+  iterations: 300
+  learning_rate: 0.0001
+  log_every: 50
+  validate_every: 100
+  train_groups_per_person: 2
+  validation_groups_per_person: 2
+  output_dir: outputs/rrnet_lprm_smooth_pilot
+  lambda_exposure: 1.0
+  lambda_shape: 2.0
+  lambda_gradient: 1.0
+  lambda_theta: 0.02

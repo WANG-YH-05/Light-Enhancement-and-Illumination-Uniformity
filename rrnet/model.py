@@ -18,9 +18,14 @@ class RRNet(nn.Module):
                  depth_input_size: int = 518, depth_invert: bool = False,
                  allow_depth_proxy: bool = False, use_agm: bool = True,
                  agm_channels: int = 64, sigma1: float = 0.10,
-                 sigma2: float = 0.05, clamp_output: bool = True) -> None:
+                 sigma2: float = 0.05, clamp_output: bool = True,
+                 enforce_physical_parameters: bool = False,
+                 split_resolution_bn: bool = False,
+                 light_parameterization: str = "affine") -> None:
         super().__init__()
-        self.lprm = LPRM(num_lights, shorter_side, coarse_factor, statistics_path)
+        self.lprm = LPRM(num_lights, shorter_side, coarse_factor, statistics_path,
+                         split_resolution_bn=split_resolution_bn,
+                         light_parameterization=light_parameterization)
         if depth_vendor_root and depth_checkpoint:
             self.depth = DepthAnythingV2Small(
                 depth_vendor_root, depth_checkpoint, depth_input_size, depth_invert
@@ -37,7 +42,9 @@ class RRNet(nn.Module):
         self.agm = AlbedoGenerationModule(
             self.lprm.encoder.feature_channels, agm_channels
         ) if use_agm else None
-        self.renderer = RenderingModule(num_lights, sigma1, sigma2, clamp_output)
+        self.renderer = RenderingModule(
+            num_lights, sigma1, sigma2, clamp_output,
+            enforce_physical_parameters=enforce_physical_parameters)
 
     def train(self, mode: bool = True) -> "RRNet":
         super().train(mode)

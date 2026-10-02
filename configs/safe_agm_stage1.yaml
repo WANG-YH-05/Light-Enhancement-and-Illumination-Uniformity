@@ -1,0 +1,45 @@
+task: "safe_agm_stage1"
+
+data:
+  root: "E:/Lighting Enhancement Project/RRNet/MEAD for RRNet/dataset"
+  metadata_file: "metadata.csv"
+  group_size: 4
+  include_identity: true
+  sampling_seed: 20260926
+
+model:
+  shorter_side: 512
+  decoder_channels: 64
+  max_log_gain: 1.20
+  output_headroom: 0.999
+
+loss:
+  max_log_gain: 1.20
+  lambda_albedo: 1.00
+  lambda_gain: 1.00
+  lambda_gradient: 0.50
+  lambda_consistency: 0.50
+  # The single-channel AGM preserves input chromaticity structurally. White
+  # balance will be a separate bounded global stage after spatial light passes.
+  lambda_chroma: 0.00
+  lambda_smooth: 0.05
+  lambda_background: 1.00
+  edge_scale: 12.0
+  epsilon: 0.001
+
+training:
+  learning_rate: 1.0e-4
+  encoder_learning_rate: 1.0e-5
+  min_learning_rate: 1.0e-6
+  warmup_steps: 300
+  weight_decay: 1.0e-4
+  iterations: 5000
+  # Each item already contains four 512px views; effective image batch is 4.
+  batch_size: 1
+  workers: 2
+  amp: true
+  log_every: 100
+  validate_every: 500
+  validation_batches: 30
+  save_every: 500
+  output_dir: "outputs/safe_agm_stage1"

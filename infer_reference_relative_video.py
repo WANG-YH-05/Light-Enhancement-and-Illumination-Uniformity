@@ -62,6 +62,37 @@ def to_tensor(rgb: np.ndarray, device: torch.device) -> torch.Tensor:
         2, 0, 1).unsqueeze(0).to(device)
 
 
+def apply_highlight_rolloff(
+        image: torch.Tensor, transfer_gain: torch.Tensor, *,
+        threshold: float, strength: float, transition: float,
+        min_darkening: float,
+) -> torch.Tensor:
+    """Compress only bright pixels that the light transfer is darkening.
+
+    This is an inference-only, chromaticity-preserving soft knee. Pixels below
+    ``threshold`` are mathematically unchanged. The gain-direction gate keeps
+    naturally bright regions intact when the selected reference asks for equal
+    or stronger illumination.
+    """
+    luma = (
+        0.2126 * image[:, 0:1]
+        + 0.7152 * image[:, 1:2]
+        + 0.0722 * image[:, 2:3]
+    )
+    gain_luma = (
+        0.2126 * transfer_gain[:, 0:1]
+        + 0.7152 * transfer_gain[:, 1:2]
+        + 0.0722 * transfer_gain[:, 2:3]
+    )
+    bright_gate = torch.sigmoid((luma - threshold) / transition)
+    darkening_amount = (1.0 - gain_luma - min_darkening).clamp_min(0.0)
+    darkening_gate = darkening_amount / (darkening_amount + transition)
+    knee = (luma - threshold).clamp_min(0.0)
+    compression = 1.0 / (1.0 + strength * bright_gate * darkening_gate)
+    compressed_luma = luma - knee * (1.0 - compression)
+    return image * (compressed_luma / luma.clamp_min(1.0e-4))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/rrnet_mead_reference_relative.yaml")
@@ -78,6 +109,15 @@ def main() -> None:
         "--max-transfer-gain", type=float,
         help="Inference-only override for the configured maximum relative-light gain.",
     )
+    parser.add_argument(
+        "--highlight-rolloff", action="store_true",
+        help=("Apply an inference-only luminance soft knee to bright person "
+              "pixels when the predicted transfer is darkening them."),
+    )
+    parser.add_argument("--highlight-threshold", type=float, default=0.78)
+    parser.add_argument("--highlight-strength", type=float, default=0.85)
+    parser.add_argument("--highlight-transition", type=float, default=0.04)
+    parser.add_argument("--highlight-min-darkening", type=float, default=0.02)
     parser.add_argument("--progress-every", type=int, default=30)
     parser.add_argument("--mask-mode", choices=("person", "none"), default="person")
     parser.add_argument(
@@ -120,14 +160,27 @@ def main() -> None:
         raise ValueError("--light-input face_roi requires --mask-mode person")
     if args.mask_every < 1:
         raise ValueError("--mask-every must be at least 1")
+    if args.highlight_rolloff and args.mask_mode != "person":
+        raise ValueError("--highlight-rolloff requires --mask-mode person")
+    if not 0.0 < args.highlight_threshold < 1.0:
+        raise ValueError("--highlight-threshold must be in (0, 1)")
+    if args.highlight_strength < 0.0:
+        raise ValueError("--highlight-strength must be non-negative")
+    if args.highlight_transition <= 0.0:
+        raise ValueError("--highlight-transition must be positive")
+    if not 0.0 <= args.highlight_min_darkening < 1.0:
+        raise ValueError("--highlight-min-darkening must be in [0, 1)")
     if args.mask_backend == "gpu" and args.light_input == "face_roi":
         raise ValueError(
             "CUDA masking currently supports --light-input full; use full or "
             "select --mask-backend cpu for face_roi.")
 
     config = load_config(args.config)
-    if config.get("task", "").lower() != "reference_relative":
-        raise ValueError("This script requires task: reference_relative")
+    task = config.get("task", "").lower()
+    if task not in {"reference_relative", "reference_relative_physical"}:
+        raise ValueError(
+            "This script requires task: reference_relative or "
+            "reference_relative_physical")
     theta_beta = (float(args.theta_beta) if args.theta_beta is not None
                   else float(config.get("video", {}).get("theta_beta", 0.95)))
     kwargs = model_kwargs(config, args.config)
@@ -208,7 +261,8 @@ def main() -> None:
         f"L{args.light_every}/D{args.depth_every}, theta_beta={theta_beta:.2f}, "
         f"max_gain={model.max_transfer_gain:.2f}, precision={args.precision}, "
         f"light_input={args.light_input}, mask_backend={args.mask_backend}, "
-        f"mask_every={args.mask_every}",
+        f"mask_every={args.mask_every}, "
+        f"highlight_rolloff={args.highlight_rolloff}",
         flush=True)
 
     with torch.inference_mode():
@@ -265,6 +319,14 @@ def main() -> None:
                 transfer_gain = model.compute_transfer_gain(
                     image, source_light, reference_light).detach()
                 result = (image * transfer_gain).clamp(0.0, 1.0)
+                if args.highlight_rolloff:
+                    result = apply_highlight_rolloff(
+                        result, transfer_gain,
+                        threshold=args.highlight_threshold,
+                        strength=args.highlight_strength,
+                        transition=args.highlight_transition,
+                        min_darkening=args.highlight_min_darkening,
+                    )
                 if person_mask_tensor is not None:
                     result = composite_person_tensor(image, result, person_mask_tensor)
 
